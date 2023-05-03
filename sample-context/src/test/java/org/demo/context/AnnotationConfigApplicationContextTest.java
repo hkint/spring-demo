@@ -14,6 +14,10 @@ import org.scan.primary.PersonBean;
 import org.scan.primary.StudentBean;
 import org.scan.primary.TeacherBean;
 import org.junit.jupiter.api.Test;
+import org.scan.proxy.InjectProxyOnConstructorBean;
+import org.scan.proxy.InjectProxyOnPropertyBean;
+import org.scan.proxy.OriginBean;
+import org.scan.proxy.SecondProxyBean;
 import org.scan.sub1.Sub1Bean;
 import org.scan.sub1.sub2.Sub2Bean;
 import org.scan.sub1.sub2.sub3.Sub3Bean;
@@ -168,5 +172,31 @@ public class AnnotationConfigApplicationContextTest {
         assertEquals(ZonedDateTime.parse("2023-03-29T20:45:01+08:00[Asia/Shanghai]"), bean.injectedZonedDateTime);
         assertEquals(Duration.parse("P2DT3H4M"), bean.injectedDuration);
         assertEquals(ZoneId.of("Asia/Shanghai"), bean.injectedZoneId);
+    }
+
+    @Test
+    public void testProxy() {
+        var ctx = new AnnotationConfigApplicationContext(ScanApplication.class, createPropertyResolver());
+        // test proxy:
+        // 获取OriginBean的实例,此处获取的应该是SendProxyBeanProxy:
+        OriginBean proxy = ctx.getBean(OriginBean.class);
+        assertSame(SecondProxyBean.class, proxy.getClass());
+        // make sure proxy.field is not injected:
+        // proxy的name和version字段并没有被注入:
+        assertNull(proxy.name);
+        assertNull(proxy.version);
+        // 但是调用proxy的getName()会最终调用原始Bean的getName(),从而返回正确的值:
+        //  对于使用Proxy模式的Bean来说，正常的方法调用对用户是透明的，但是，直接访问Bean注入的字段，如果获取的是Proxy，则字段全部为null，因为注入并没有发生在Proxy，而是原始Bean。
+        // 这也是为什么当我们需要访问某个注入的Bean时，总是调用方法而不是直接访问字段
+        assertEquals("Scan App", proxy.getName());
+        assertEquals("v1.0", proxy.getVersion());
+
+        // other beans are injected proxy instance:
+        // 获取InjectProxyOnConstructorBean实例:
+        var inject1 = ctx.getBean(InjectProxyOnPropertyBean.class);
+        var inject2 = ctx.getBean(InjectProxyOnConstructorBean.class);
+        // 注入的OriginBean应该为Proxy，而且和前面返回的proxy是同一实例:
+        assertSame(proxy, inject1.injected);
+        assertSame(proxy, inject2.injected);
     }
 }

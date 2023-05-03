@@ -27,7 +27,9 @@ public class BeanDefinition implements Comparable<BeanDefinition> {
     // 是否标识 @Primary:
     private final boolean primary;
 
-    // init/destroy方法名称:
+    // autowired and called init method:
+    private boolean init = false;
+
     private String initMethodName;
     private String destroyMethodName;
 
@@ -137,6 +139,14 @@ public class BeanDefinition implements Comparable<BeanDefinition> {
                     this.beanClass.getName()));
         }
         this.instance = instance;
+    }
+
+    public boolean isInit() {
+        return this.init;
+    }
+
+    public void setInit() {
+        this.init = true;
     }
 
     public boolean isPrimary() {

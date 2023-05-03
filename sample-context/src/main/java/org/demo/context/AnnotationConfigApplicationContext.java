@@ -34,6 +34,11 @@ public class AnnotationConfigApplicationContext {
      */
     private Set<String> creatingBeanNames;
 
+    /**
+     * BeanPostProcessor
+     */
+    private List<BeanPostProcessor> beanPostProcessors = new ArrayList<>();
+
     public AnnotationConfigApplicationContext(Class<?> configClass, PropertyResolver propertyResolver) {
         this.propertyResolver = propertyResolver;
 
@@ -53,6 +58,16 @@ public class AnnotationConfigApplicationContext {
                     createBeanAsEarlySingleton(def);
                     return def.getName();
                 }).collect(Collectors.toList());
+
+        // 创建BeanPostProcessor类型的Bean:
+        List<BeanPostProcessor> processors = this.beans.values().stream()
+                // 过滤出BeanPostProcessor:
+                .filter(this::isBeanPostProcessorDefinition)
+                // 排序:
+                .sorted()
+                // instantiate and collect:
+                .map(def -> (BeanPostProcessor) createBeanAsEarlySingleton(def)).toList();
+        this.beanPostProcessors.addAll(processors);
 
         // 创建其他普通Bean:
         createNormalBeans();
@@ -383,6 +398,13 @@ public class AnnotationConfigApplicationContext {
                         String.format("Cannot specify @Autowired when create @Configuration bean '%s': %s.", def.getName(), def.getBeanClass().getName()));
             }
 
+            // BeanPostProcessor不能依赖其他Bean，不允许使用@Autowired创建:
+            final boolean isBeanPostProcessor = isBeanPostProcessorDefinition(def);
+            if (isBeanPostProcessor && autowired != null) {
+                throw new BeanCreationException(
+                        String.format("Cannot specify @Autowired when create BeanPostProcessor '%s': %s.", def.getName(), def.getBeanClass().getName()));
+            }
+
             // 参数需要@Value或@Autowired两者之一:
             if (value != null && autowired != null) {
                 throw new BeanCreationException(
@@ -442,6 +464,20 @@ public class AnnotationConfigApplicationContext {
             }
         }
         def.setInstance(instance);
+
+        // 调用BeanPostProcessor处理Bean:
+        for (BeanPostProcessor processor : beanPostProcessors) {
+            Object processed = processor.postProcessBeforeInitialization(def.getInstance(), def.getName());
+            if (processed == null) {
+                throw new BeanCreationException(String.format("PostBeanProcessor returns null when process bean '%s' by %s", def.getName(), processor));
+            }
+            // 如果一个BeanPostProcessor替换了原始Bean，则更新Bean的引用:
+            if (def.getInstance() != processed) {
+                logger.atDebug().log("Bean '{}' was replaced by post processor {}.", def.getName(), processor.getClass().getName());
+                def.setInstance(processed);
+            }
+        }
+
         return def.getInstance();
     }
 
@@ -531,8 +567,10 @@ public class AnnotationConfigApplicationContext {
      * 注入依赖但不调用init方法
      */
     void injectBean(BeanDefinition def) {
+        // 获取Bean实例，或被代理的原始实例 (BeanPostProcessor)
+        final Object beanInstance = getProxiedInstance(def);
         try {
-            injectProperties(def, def.getBeanClass(), def.getInstance());
+            injectProperties(def, def.getBeanClass(), beanInstance);
         } catch (ReflectiveOperationException e) {
             throw new BeanCreationException(e);
         }
@@ -650,8 +688,21 @@ public class AnnotationConfigApplicationContext {
      * 调用init方法
      */
     void initBean(BeanDefinition def) {
+        // 获取Bean实例，或被代理的原始实例:
+        final Object beanInstance = getProxiedInstance(def);
+
         // 调用init方法:
-        callMethod(def.getInstance(), def.getInitMethod(), def.getInitMethodName());
+        callMethod(beanInstance, def.getInitMethod(), def.getInitMethodName());
+
+        // 调用BeanPostProcessor.postProcessAfterInitialization():
+        beanPostProcessors.forEach(beanPostProcessor -> {
+            Object processedInstance = beanPostProcessor.postProcessAfterInitialization(def.getInstance(), def.getName());
+            if (processedInstance != def.getInstance()) {
+                logger.atDebug().log("BeanPostProcessor {} return different bean from {} to {}.", beanPostProcessor.getClass().getSimpleName(),
+                        def.getInstance().getClass().getName(), processedInstance.getClass().getName());
+                def.setInstance(processedInstance);
+            }
+        });
     }
 
     private void callMethod(Object beanInstance, Method method, String namedMethod) {
@@ -672,5 +723,29 @@ public class AnnotationConfigApplicationContext {
                 throw new BeanCreationException(e);
             }
         }
+    }
+
+    boolean isBeanPostProcessorDefinition(BeanDefinition def) {
+        return BeanPostProcessor.class.isAssignableFrom(def.getBeanClass());
+    }
+
+
+    private Object getProxiedInstance(BeanDefinition def) {
+        Object beanInstance = def.getInstance();
+        // 如果Proxy改变了原始Bean，又希望注入到原始Bean，则由BeanPostProcessor指定原始Bean:
+        List<BeanPostProcessor> reversedBeanPostProcessors = new ArrayList<>(this.beanPostProcessors);
+        //  对BeanPostProcessor列表顺序进行翻转是为了确保最新添加的BeanPostProcessor最后被调用。因为在这里，每个BeanPostProcessor都可以更改bean实例，所以后面添加的BeanPostProcessor可能会覆盖前面添加的BeanPostProcessor所做的更改。
+        // 通过翻转顺序，可以保证后添加的BeanPostProcessor最后被调用，从而确保最终的bean实例已经被所有的BeanPostProcessor处理过。
+        // 即一个原始Bean，比如UserService，被一个事务处理的BeanPostProcsssor代理为UserServiceTx，又被一个性能监控的BeanPostProcessor代理为UserServiceMetric，还原的时候，对BeanPostProcsssor做一个倒序，先还原为UserServiceTx，再还原为UserService。
+        Collections.reverse(reversedBeanPostProcessors);
+        for (BeanPostProcessor beanPostProcessor : reversedBeanPostProcessors) {
+            Object restoredInstance = beanPostProcessor.postProcessOnSetProperty(beanInstance, def.getName());
+            if (restoredInstance != beanInstance) {
+                logger.atDebug().log("BeanPostProcessor {} specified injection from {} to {}.", beanPostProcessor.getClass().getSimpleName(),
+                        beanInstance.getClass().getSimpleName(), restoredInstance.getClass().getSimpleName());
+                beanInstance = restoredInstance;
+            }
+        }
+        return beanInstance;
     }
 }
