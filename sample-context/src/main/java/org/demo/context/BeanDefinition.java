@@ -22,9 +22,9 @@ public class BeanDefinition implements Comparable<BeanDefinition> {
     private final String factoryName;
     // 工厂方法/null:
     private final Method factoryMethod;
-    // Bean的顺序:
+    // Bean的顺序 used by ApplicationContext.getBeans(type):
     private final int order;
-    // 是否标识@Primary:
+    // 是否标识 @Primary:
     private final boolean primary;
 
     // init/destroy方法名称:
