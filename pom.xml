@@ -11,6 +11,7 @@
     <modules>
         <module>sample-context</module>
         <module>sample-aop</module>
+        <module>sample-jdbc</module>
     </modules>
 
     <properties>
