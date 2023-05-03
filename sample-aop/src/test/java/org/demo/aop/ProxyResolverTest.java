@@ -14,7 +14,7 @@ class ProxyResolverTest {
         assertEquals("Hello, Bob.", origin.hello());
 
         // create proxy:
-        OriginBean proxy = new ProxyResolver().createProxy(origin, new PoliteInvocationHandler());
+        OriginBean proxy = ProxyResolver.getInstance().createProxy(origin, new PoliteInvocationHandler());
 
         // Proxy类名,类似OriginBean$ByteBuddy$9hQwRy3T:
         System.out.println(proxy.getClass().getName());

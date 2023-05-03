@@ -22,7 +22,14 @@ public class ProxyResolver {
 
     private static ProxyResolver INSTANCE = null;
 
+    public static ProxyResolver getInstance() {
+        if (INSTANCE == null) {
+            INSTANCE = new ProxyResolver();
+        }
+        return INSTANCE;
+    }
 
+    private ProxyResolver() {}
 
     /**
      * 传入原始bean对象和InvocationHandler对象
