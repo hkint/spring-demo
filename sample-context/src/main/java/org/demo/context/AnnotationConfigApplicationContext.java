@@ -16,7 +16,7 @@ import java.lang.reflect.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class AnnotationConfigApplicationContext {
+public class AnnotationConfigApplicationContext implements ConfigurableApplicationContext{
 
     protected final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -40,6 +40,8 @@ public class AnnotationConfigApplicationContext {
     private List<BeanPostProcessor> beanPostProcessors = new ArrayList<>();
 
     public AnnotationConfigApplicationContext(Class<?> configClass, PropertyResolver propertyResolver) {
+        ApplicationContextUtils.setApplicationContext(this);
+
         this.propertyResolver = propertyResolver;
 
         // 扫描获取所有Bean的Class类型:
@@ -499,6 +501,11 @@ public class AnnotationConfigApplicationContext {
         });
     }
 
+    @Override
+    public boolean containsBean(String name) {
+        return this.beans.containsKey(name);
+    }
+
     /**
      * 通过Name查找Bean，不存在时抛出NoSuchBeanDefinitionException
      */
@@ -532,6 +539,32 @@ public class AnnotationConfigApplicationContext {
             throw new NoSuchBeanDefinitionException(String.format("No bean defined with type '%s'.", requiredType));
         }
         return (T) def.getRequiredInstance();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T> List<T> getBeans(Class<T> requiredType) {
+        List<BeanDefinition> defs = findBeanDefinitions(requiredType);
+        if (defs.isEmpty()) {
+            return List.of();
+        }
+        List<T> list = new ArrayList<>(defs.size());
+        for (var def : defs) {
+            list.add((T) def.getRequiredInstance());
+        }
+        return list;
+    }
+
+    @Override
+    public void close() {
+        logger.info("Closing {}...", this.getClass().getName());
+        this.beans.values().forEach(def -> {
+            final Object beanInstance = getProxiedInstance(def);
+            callMethod(beanInstance, def.getDestroyMethod(), def.getDestroyMethodName());
+        });
+        this.beans.clear();
+        logger.info("{} closed.", this.getClass().getName());
+        ApplicationContextUtils.setApplicationContext(null);
     }
 
     // findXxx与getXxx类似，但不存在时返回null
