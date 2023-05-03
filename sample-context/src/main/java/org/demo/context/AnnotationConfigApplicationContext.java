@@ -4,19 +4,15 @@ import jakarta.annotation.Nullable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.demo.annotation.*;
-import org.demo.exception.BeanCreationException;
-import org.demo.exception.BeanDefinitionException;
-import org.demo.exception.BeanNotOfRequiredTypeException;
-import org.demo.exception.NoUniqueBeanDefinitionException;
+import org.demo.exception.*;
 import org.demo.io.PropertyResolver;
 import org.demo.io.ResourceResolver;
 import org.demo.utils.ClassUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -24,8 +20,19 @@ public class AnnotationConfigApplicationContext {
 
     protected final Logger logger = LoggerFactory.getLogger(getClass());
 
+    /**
+     *  属性解析器
+     */
     protected final PropertyResolver propertyResolver;
+    /**
+     * 记录扫描到的Bean
+     */
     protected final Map<String, BeanDefinition> beans;
+
+    /**
+     * 记录正在创建的Bean
+     */
+    private Set<String> creatingBeanNames;
 
     public AnnotationConfigApplicationContext(Class<?> configClass, PropertyResolver propertyResolver) {
         this.propertyResolver = propertyResolver;
@@ -35,6 +42,26 @@ public class AnnotationConfigApplicationContext {
 
         // 创建Bean的定义:
         this.beans = createBeanDefinitions(beanClassNames);
+
+        // 创建BeanName检测循环依赖:
+        this.creatingBeanNames = new HashSet<>();
+
+        // 创建@Configuration类型的Bean:
+        this.beans.values().stream()
+                // 过滤出@Configuration:
+                .filter(this::isConfigurationDefinition).sorted().map(def -> {
+                    createBeanAsEarlySingleton(def);
+                    return def.getName();
+                }).collect(Collectors.toList());
+
+        // 创建其他普通Bean:
+        createNormalBeans();
+
+        if (logger.isDebugEnabled()) {
+            this.beans.values().stream().sorted().forEach(def -> {
+                logger.debug("bean initialized: {}", def);
+            });
+        }
     }
 
     /**
@@ -315,5 +342,181 @@ public class AnnotationConfigApplicationContext {
         } else {
             throw new NoUniqueBeanDefinitionException(String.format("Multiple bean with type '%s' found, and multiple @Primary specified.", type.getName()));
         }
+    }
+
+
+
+    /**
+     * 创建一个Bean，但不进行字段和方法级别的注入。如果创建的Bean不是Configuration，则在构造方法中注入的依赖Bean会自动创建。
+     */
+    public Object createBeanAsEarlySingleton(BeanDefinition def) {
+        logger.atDebug().log("Try create bean '{}' as early singleton: {}", def.getName(), def.getBeanClass().getName());
+        // 检测循环依赖
+        if (!this.creatingBeanNames.add(def.getName())) {
+            throw new UnsatisfiedDependencyException(String.format("Circular dependency detected when create bean '%s'", def.getName()));
+        }
+        // 创建方式：构造方法或工厂方法:
+        Executable createFn = def.getFactoryName() == null ?
+                def.getConstructor() : def.getFactoryMethod();
+
+        // 创建参数:
+        final Parameter[] parameters = createFn.getParameters();
+        final Annotation[][] parametersAnnos = createFn.getParameterAnnotations();
+        Object[] args = new Object[parameters.length];
+        for (int i = 0; i < parameters.length; i++) {
+            // 从参数中获取 @Value @Autowired
+            final Parameter param = parameters[i];
+            final Annotation[] paramAnnos = parametersAnnos[i];
+            final Value value = ClassUtils.getAnnotation(paramAnnos, Value.class);
+            final Autowired autowired = ClassUtils.getAnnotation(paramAnnos, Autowired.class);
+
+            // @Configuration类型的Bean是工厂，不允许使用@Autowired创建:
+            final boolean isConfiguration = isConfigurationDefinition(def);
+            if (isConfiguration && autowired != null) {
+                throw new BeanCreationException(
+                        String.format("Cannot specify @Autowired when create @Configuration bean '%s': %s.", def.getName(), def.getBeanClass().getName()));
+            }
+
+            // 参数需要@Value或@Autowired两者之一:
+            if (value != null && autowired != null) {
+                throw new BeanCreationException(
+                        String.format("Cannot specify both @Autowired and @Value when create bean '%s': %s.", def.getName(), def.getBeanClass().getName()));
+            }
+            if (value == null && autowired == null) {
+                throw new BeanCreationException(
+                        String.format("Must specify @Autowired or @Value when create bean '%s': %s.", def.getName(), def.getBeanClass().getName()));
+            }
+            // 参数类型:
+            final Class<?> type = param.getType();
+            if (value != null) {
+                // 参数设置为查询的@Value:
+                args[i] = this.propertyResolver.getRequiredProperty(value.value(), type);
+            } else {
+                // 参数是@Autowired,查找依赖的BeanDefinition:
+                String name = autowired.name();
+                boolean required = autowired.value();
+                // 依赖的BeanDefinition:
+                BeanDefinition dependsOnDef = name.isEmpty() ? findBeanDefinition(type) : findBeanDefinition(name, type);
+                // 检测required==true?
+                if (required && dependsOnDef == null) {
+                    throw new BeanCreationException(String.format("Missing autowired bean with type '%s' when create bean '%s': %s.", type.getName(),
+                            def.getName(), def.getBeanClass().getName()));
+                }
+                if (dependsOnDef != null) {
+                    // 获取依赖Bean的实例
+                    Object autowiredBeanInstance = dependsOnDef.getInstance();
+                    if (autowiredBeanInstance == null && !isConfiguration) {
+                        // 当前依赖Bean尚未初始化，递归调用初始化该依赖Bean:
+                        autowiredBeanInstance = createBeanAsEarlySingleton(dependsOnDef);
+                    }
+                    // 参数设置为依赖的Bean实例:
+                    args[i] = autowiredBeanInstance;
+                } else {
+                    args[i] = null;
+                }
+            }
+        }
+
+        // 已拿到所有方法参数,创建Bean实例:
+        Object instance = null;
+        if (def.getFactoryName() == null) {
+            // 用构造方法创建:
+            try {
+                instance = def.getConstructor().newInstance(args);
+            } catch (Exception e) {
+                throw new BeanCreationException(String.format("Exception when create bean '%s': %s", def.getName(), def.getBeanClass().getName()), e);
+            }
+        } else {
+            // 用@Bean方法创建:
+            Object configInstance = getBean(def.getFactoryName());
+            try {
+                instance = def.getFactoryMethod().invoke(configInstance, args);
+            } catch (Exception e) {
+                throw new BeanCreationException(String.format("Exception when create bean '%s': %s", def.getName(), def.getBeanClass().getName()), e);
+            }
+        }
+        def.setInstance(instance);
+        return def.getInstance();
+    }
+
+    /**
+     * 创建普通的Bean
+     */
+    void createNormalBeans() {
+        // 获取BeanDefinition列表:
+        List<BeanDefinition> defs = this.beans.values().stream()
+                // filter bean definitions by not instantiation:
+                .filter(def -> def.getInstance() == null).sorted().toList();
+
+        defs.forEach(def -> {
+            // 如果Bean未被创建(可能在其他Bean的构造方法注入前被创建):
+            if (def.getInstance() == null) {
+                // 创建Bean:
+                createBeanAsEarlySingleton(def);
+            }
+        });
+    }
+
+    /**
+     * 通过Name查找Bean，不存在时抛出NoSuchBeanDefinitionException
+     */
+    @SuppressWarnings("unchecked")
+    public <T> T getBean(String name) {
+        BeanDefinition def = this.beans.get(name);
+        if (def == null) {
+            throw new NoSuchBeanDefinitionException(String.format("No bean defined with name '%s'.", name));
+        }
+        return (T) def.getRequiredInstance();
+    }
+
+    /**
+     * 通过Name和Type查找Bean，不存在抛出NoSuchBeanDefinitionException，存在但与Type不匹配抛出BeanNotOfRequiredTypeException
+     */
+    public <T> T getBean(String name, Class<T> requiredType) {
+        T t = findBean(name, requiredType);
+        if (t == null) {
+            throw new NoSuchBeanDefinitionException(String.format("No bean defined with name '%s' and type '%s'.", name, requiredType));
+        }
+        return t;
+    }
+
+    /**
+     * 通过Type查找Bean，不存在抛出NoSuchBeanDefinitionException，存在多个但缺少唯一@Primary标注抛出NoUniqueBeanDefinitionException
+     */
+    @SuppressWarnings("unchecked")
+    public <T> T getBean(Class<T> requiredType) {
+        BeanDefinition def = findBeanDefinition(requiredType);
+        if (def == null) {
+            throw new NoSuchBeanDefinitionException(String.format("No bean defined with type '%s'.", requiredType));
+        }
+        return (T) def.getRequiredInstance();
+    }
+
+    // findXxx与getXxx类似，但不存在时返回null
+    @Nullable
+    @SuppressWarnings("unchecked")
+    protected <T> T findBean(String name, Class<T> requiredType) {
+        BeanDefinition def = findBeanDefinition(name, requiredType);
+        if (def == null) {
+            return null;
+        }
+        return (T) def.getRequiredInstance();
+    }
+
+
+    @Nullable
+    @SuppressWarnings("unchecked")
+    protected <T> T findBean(Class<T> requiredType) {
+        BeanDefinition def = findBeanDefinition(requiredType);
+        if (def == null) {
+            return null;
+        }
+        return (T) def.getRequiredInstance();
+    }
+
+    @Nullable
+    @SuppressWarnings("unchecked")
+    protected <T> List<T> findBeans(Class<T> requiredType) {
+        return findBeanDefinitions(requiredType).stream().map(def -> (T) def.getRequiredInstance()).collect(Collectors.toList());
     }
 }
