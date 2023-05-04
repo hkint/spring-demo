@@ -12,6 +12,7 @@
         <module>sample-context</module>
         <module>sample-aop</module>
         <module>sample-jdbc</module>
+        <module>sample-web</module>
     </modules>
 
     <properties>
