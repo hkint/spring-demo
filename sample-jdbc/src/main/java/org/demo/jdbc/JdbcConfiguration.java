@@ -6,6 +6,9 @@ import org.demo.annotation.Autowired;
 import org.demo.annotation.Bean;
 import org.demo.annotation.Configuration;
 import org.demo.annotation.Value;
+import org.demo.jdbc.tx.DataSourceTransactionManager;
+import org.demo.jdbc.tx.PlatformTransactionManager;
+import org.demo.jdbc.tx.TransactionalBeanPostProcessor;
 
 import javax.sql.DataSource;
 
@@ -40,5 +43,15 @@ public class JdbcConfiguration {
     @Bean
     JdbcTemplate jdbcTemplate(@Autowired DataSource dataSource) {
         return new JdbcTemplate(dataSource);
+    }
+
+    @Bean
+    TransactionalBeanPostProcessor transactionalBeanPostProcessor() {
+        return new TransactionalBeanPostProcessor();
+    }
+
+    @Bean
+    PlatformTransactionManager platformTransactionManager(@Autowired DataSource dataSource) {
+        return new DataSourceTransactionManager(dataSource);
     }
 }

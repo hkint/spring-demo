@@ -1,6 +1,7 @@
 package org.demo.jdbc;
 
 import org.demo.exception.DataAccessException;
+import org.demo.jdbc.tx.TransactionalUtils;
 
 import javax.sql.DataSource;
 import java.sql.*;
@@ -16,25 +17,36 @@ public class JdbcTemplate {
 
     /**
      * 以回调作为参数的模板方法
+     * 如果有事务，自动加入当前事务，否则，按普通SQL执行（数据库隐含事务）
      *
      * @param action 在连接上执行的回调操作
      * @param <T>    回调返回类型
      * @return 回调操作的结果
      * @throws DataAccessException 当连接时发生SQL异常时抛出
      */
-    public <T> T execute(ConnectionCallback<T> action) {
-        try (Connection newConn = dataSource.getConnection()) { // 获取一个新的数据库连接
-            final boolean autoCommit = newConn.getAutoCommit(); // 获取当前连接的自动提交状态
-            if (!autoCommit) {
-                newConn.setAutoCommit(true); // 将连接的自动提交状态设置为 true
+    public <T> T execute(ConnectionCallback<T> action) throws DataAccessException {
+        // 尝试获取当前事务连接:
+        Connection current = TransactionalUtils.getCurrentConnection();
+        if (current != null) {
+            try {
+                return action.doInConnection(current);
+            } catch (SQLException e) {
+                throw new DataAccessException(e);
             }
-            T result = action.doInConnection(newConn); // 在新连接上执行给定的回调操作
+        }
+        // 获取新连接:
+        try (Connection newConn = dataSource.getConnection()) {
+            final boolean autoCommit = newConn.getAutoCommit();
             if (!autoCommit) {
-                newConn.setAutoCommit(false); // 将连接的自动提交状态设置为 false
+                newConn.setAutoCommit(true);
             }
-            return result; // 返回操作的结果
+            T result = action.doInConnection(newConn);
+            if (!autoCommit) {
+                newConn.setAutoCommit(false);
+            }
+            return result;
         } catch (SQLException e) {
-            throw new DataAccessException(e); // 抛出数据库访问异常
+            throw new DataAccessException(e);
         }
     }
 
