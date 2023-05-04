@@ -23,13 +23,21 @@ public class JdbcTemplate {
      * @throws DataAccessException 当连接时发生SQL异常时抛出
      */
     public <T> T execute(ConnectionCallback<T> action) {
-        try (Connection newConn = dataSource.getConnection()) {
+        try (Connection newConn = dataSource.getConnection()) { // 获取一个新的数据库连接
+            final boolean autoCommit = newConn.getAutoCommit(); // 获取当前连接的自动提交状态
+            if (!autoCommit) {
+                newConn.setAutoCommit(true); // 将连接的自动提交状态设置为 true
+            }
             T result = action.doInConnection(newConn); // 在新连接上执行给定的回调操作
+            if (!autoCommit) {
+                newConn.setAutoCommit(false); // 将连接的自动提交状态设置为 false
+            }
             return result; // 返回操作的结果
         } catch (SQLException e) {
             throw new DataAccessException(e); // 抛出数据库访问异常
         }
     }
+
 
     /**
      * 实现了ConnectionCallback，内部又调用了传入的PreparedStatementCreator和PreparedStatementCallback
